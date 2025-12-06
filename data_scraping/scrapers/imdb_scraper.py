@@ -1,9 +1,9 @@
 import requests
-import helper
+from .. import helper
 from bs4 import BeautifulSoup
 
 
-class Scraper:
+class IMDBScraper:
     def __init__(self, url, headers):
         self.url = url
         self.headers = headers

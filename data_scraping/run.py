@@ -1,7 +1,11 @@
 import csv
-from config import URLs, HEADERS
-from scraper import Scraper
-import helper
+import json
+from pathlib import Path
+
+from .config import URLs, HEADERS
+from .scrapers.imdb_scraper import IMDBScraper
+from .scrapers.wikipedia_scraper import WikipediaScraper
+from . import helper
 from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -78,53 +82,97 @@ def scrape_2010s_with_selenium(url: str):
     return dramas
 
 
-csv_output = "kdrama_list.csv"
-with open(csv_output, "w", newline="", encoding="utf-8") as file:
-    writer = csv.writer(file)
-    writer.writerow(
-        ["title", "release_year", "num_episodes", "rating_type", "rating_score", "cast", "short_description"]
-    )
+def build_wikipedia_map(wikipedia_list_path: Path) -> dict[str, str]:
+    """Load wikipedia_list.json and return {title: url} mapping."""
+    with open(wikipedia_list_path, encoding="utf-8") as f:
+        raw_list = json.load(f)
 
-    # 1) Scrape 2000s and 2020s with the requests-based Scraper
+    title_to_url: dict[str, str] = {}
+    for entry in raw_list:
+        title, url = next(iter(entry.items()))
+        title_to_url[title] = url
+    return title_to_url
+
+
+def main():
+    # 1) Collect all dramas from IMDb (2000s + 2020s via requests, 2010s via Selenium)
+    all_dramas: list[dict] = []
+
     for period, URL in URLs.items():
         if period == "2010s":
+            dramas = scrape_2010s_with_selenium(URL)
+        else:
+            scraper_obj = IMDBScraper(URL, HEADERS)
+            dramas = scraper_obj.get_drama_list()
+
+        all_dramas.extend(dramas)
+
+    # 2) Enrich with Wikipedia info where available
+    wikipedia_list_path = Path(__file__).parent / "data" / "wikipedia_list.json"
+    title_to_url = build_wikipedia_map(wikipedia_list_path)
+
+    for drama in all_dramas:
+        title = drama["title"]
+        wiki_url = title_to_url.get(title)
+        if not wiki_url:
             continue
 
-        scraper_obj = Scraper(URL, HEADERS)
-        drama_list = scraper_obj.get_drama_list()
+        wscraper = WikipediaScraper(wiki_url, HEADERS)
+        info_list = wscraper.get_info_list()
+        if not info_list:
+            continue
 
-        for drama in drama_list:
+        info = info_list[0]
+        # Map Wikipedia fields into our schema
+        drama["network_provider"] = info.get("network", "")
+        drama["screenwriter"] = ", ".join(info.get("screenwriter", []))
+        drama["director"] = ", ".join(info.get("director", []))
+        drama["plot"] = info.get("plot", "")
+        drama["source"] = wiki_url
+
+    # 3) Write final CSV with IMDb + Wikipedia fields
+    csv_output = "kdrama_list.csv"
+    fieldnames = [
+        "title",
+        "release_year",
+        "num_episodes",
+        "rating_type",
+        "rating_score",
+        "cast",
+        "short_description",
+        "network_provider",
+        "screenwriter",
+        "director",
+        "plot",
+        "source",
+    ]
+
+    with open(csv_output, "w", newline="", encoding="utf-8") as file:
+        writer = csv.writer(file)
+        writer.writerow(fieldnames)
+
+        for drama in all_dramas:
             print(
                 f"{drama['title']} {drama['release_year']} {drama['num_episodes']} "
                 f"{drama['rating_type']} {drama['rating_score']} {drama['cast']} {drama['short_description']}"
             )
             writer.writerow(
                 [
-                    drama["title"],
-                    drama["release_year"],
-                    drama["num_episodes"],
-                    drama["rating_type"],
-                    drama["rating_score"],
-                    ", ".join(drama["cast"]),
-                    drama["short_description"],
+                    drama.get("title", ""),
+                    drama.get("release_year", ""),
+                    drama.get("num_episodes", ""),
+                    drama.get("rating_type", ""),
+                    drama.get("rating_score", ""),
+                    ", ".join(drama.get("cast", [])),
+                    drama.get("short_description", ""),
+                    drama.get("network_provider", ""),
+                    drama.get("screenwriter", ""),
+                    drama.get("director", ""),
+                    drama.get("plot", ""),
+                    drama.get("source", ""),
                 ]
             )
 
-    # 2) Scrape 2010s with Selenium and append to CSV
-    dramas_2010s = scrape_2010s_with_selenium(URLs["2010s"])
-    for drama in dramas_2010s:
-        print(
-            f"{drama['title']} {drama['release_year']} {drama['num_episodes']} "
-            f"{drama['rating_type']} {drama['rating_score']} {drama['cast']} {drama['short_description']}"
-        )
-        writer.writerow(
-            [
-                drama["title"],
-                drama["release_year"],
-                drama["num_episodes"],
-                drama["rating_type"],
-                drama["rating_score"],
-                ", ".join(drama["cast"]),
-                drama["short_description"],
-            ]
-        )
+
+if __name__ == "__main__":
+    main()
